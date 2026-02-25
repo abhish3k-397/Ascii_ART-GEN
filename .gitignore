@@ -2,8 +2,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 .env
+.env.local
 .venv
 env/
 venv/
 *.log
+logs/
 .DS_Store
+*.swp
+*.swo

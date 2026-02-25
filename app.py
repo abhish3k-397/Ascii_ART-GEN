@@ -1,24 +1,127 @@
 #!/usr/bin/env python3
 import os
 import io
+import logging
 import tempfile
 import base64
-from flask import Flask, render_template, request, send_file, jsonify
+import uuid
+import time
+from functools import wraps
+from flask import Flask, render_template, request, send_file, jsonify, g
 from PIL import Image, ImageDraw, ImageFont
 import ascii_converter
+from config import config
 
+env = os.getenv('FLASK_ENV', 'production')
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
-app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
+app.config.from_object(config[env])
 
-last_generated_image = None
+os.makedirs(os.path.dirname(app.config['LOG_FILE']), exist_ok=True)
+
+class RequestIdFormatter(logging.Formatter):
+    def format(self, record):
+        if not hasattr(record, 'request_id'):
+            record.request_id = 'N/A'
+        return super().format(record)
+
+formatter = RequestIdFormatter(
+    '{"time":"%(asctime)s","level":"%(levelname)s","request_id":"%(request_id)s","message":"%(message)s"}'
+)
+
+file_handler = logging.FileHandler(app.config['LOG_FILE'])
+file_handler.setFormatter(formatter)
+
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+
+logger = logging.getLogger()
+logger.setLevel(getattr(logging, app.config['LOG_LEVEL']))
+logger.handlers = [file_handler, stream_handler]
+logger.request_id = 'N/A'
+
+@app.before_request
+def before_request():
+    g.request_id = request.headers.get('X-Request-ID', str(uuid.uuid4())[:8])
+    g.start_time = time.time()
+    logging.getLogger().request_id = g.request_id
+
+
+@app.after_request
+def after_request(response):
+    if hasattr(g, 'start_time'):
+        duration = time.time() - g.start_time
+        logging.info(f"{request.method} {request.path} - {response.status_code} - {duration:.3f}s")
+    response.headers['X-Request-ID'] = g.request_id
+    return response
+
+
+class RateLimiter:
+    """Simple in-memory rate limiter."""
+    def __init__(self):
+        self.requests = {}
+    
+    def is_allowed(self, key: str, limit: int, window: int) -> bool:
+        now = time.time()
+        if key not in self.requests:
+            self.requests[key] = []
+        
+        self.requests[key] = [t for t in self.requests[key] if now - t < window]
+        
+        if len(self.requests[key]) >= limit:
+            return False
+        
+        self.requests[key].append(now)
+        return True
+
+rate_limiter = RateLimiter()
+
+
+def rate_limit(limit: int = 60, window: int = 60):
+    """Rate limiting decorator."""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            if not app.config.get('RATE_LIMIT_ENABLED', True):
+                return f(*args, **kwargs)
+            
+            client_ip = request.remote_addr
+            if not rate_limiter.is_allowed(client_ip, limit, window):
+                logging.warning(f"Rate limit exceeded for {client_ip}")
+                return jsonify({'error': 'Rate limit exceeded. Please try again later.'}), 429
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
+
+
+def allowed_file(filename: str) -> bool:
+    """Check if file extension is allowed."""
+    return '.' in filename and \
+           filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
+
+
+def validate_image(file: io.BytesIO) -> tuple[bool, str]:
+    """Validate uploaded image file."""
+    try:
+        img = Image.open(file)
+        img.verify()
+        file.seek(0)
+        
+        w, h = img.size
+        if w < 1 or h < 1:
+            return False, "Invalid image dimensions"
+        
+        if w * h > 25_000_000:
+            return False, "Image too large (max ~5000x5000)"
+        
+        return True, ""
+    except Exception as e:
+        return False, f"Invalid image: {str(e)}"
+
 
 GRADIENT_THEMES = {
     'light': {
         'background': (255, 255, 255),
-        'gradient': [
-            (0, 0, 0),
-        ]
+        'gradient': [(0, 0, 0)]
     },
     'warm': {
         'background': (255, 255, 255),
@@ -42,21 +145,8 @@ GRADIENT_THEMES = {
     },
 }
 
-def pil_to_pixels(pil_image):
-    """Convert PIL image to pixel data compatible with ascii_converter."""
-    if pil_image.mode != 'RGB':
-        pil_image = pil_image.convert('RGB')
-    
-    pixels = []
-    for y in range(pil_image.height):
-        row = []
-        for x in range(pil_image.width):
-            r, g, b = pil_image.getpixel((x, y))
-            row.append((r, g, b))
-        pixels.append(row)
-    return pixels, pil_image.width, pil_image.height
 
-def get_gradient_color(gray_value, gradient_colors):
+def get_gradient_color(gray_value: int, gradient_colors: list) -> tuple:
     """Get color from gradient based on gray value (0-255)."""
     if len(gradient_colors) < 2:
         return gradient_colors[0] if gradient_colors else (0, 0, 0)
@@ -78,7 +168,9 @@ def get_gradient_color(gray_value, gradient_colors):
     
     return (r, g, b)
 
-def pixels_to_image(pixels, ascii_art, theme='light', zoom=1.0, orig_w=1, orig_h=1):
+
+def pixels_to_image(pixels: list, ascii_art: list, theme: str = 'light', 
+                    zoom: float = 1.0, orig_w: int = 1, orig_h: int = 1) -> Image.Image:
     """Render ASCII art as a PNG image with proper scaling."""
     if not ascii_art or not pixels:
         return None
@@ -100,8 +192,9 @@ def pixels_to_image(pixels, ascii_art, theme='light', zoom=1.0, orig_w=1, orig_h
     font_size = max(8, int(zoom * 10))
     
     try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", font_size)
-    except:
+        font_path = os.path.join(os.path.dirname(__file__), 'fonts', 'DejaVuSansMono.ttf')
+        font = ImageFont.truetype(font_path, font_size)
+    except Exception:
         font = ImageFont.load_default()
     
     ascii_w = max(len(line) for line in ascii_art) if ascii_art else 1
@@ -119,8 +212,8 @@ def pixels_to_image(pixels, ascii_art, theme='light', zoom=1.0, orig_w=1, orig_h
             if char == ' ':
                 continue
             
-            r, g, b = pixels[y][x]
-            gray = (r * 30 + g * 59 + b * 11) // 100
+            r, g_val, b = pixels[y][x]
+            gray = (r * 30 + g_val * 59 + b * 11) // 100
             
             color = get_gradient_color(gray, gradient_colors)
             
@@ -131,11 +224,24 @@ def pixels_to_image(pixels, ascii_art, theme='light', zoom=1.0, orig_w=1, orig_h
     
     return img
 
+
+@app.route('/health')
+def health():
+    """Health check endpoint."""
+    return jsonify({
+        'status': 'healthy',
+        'request_id': g.request_id,
+        'uptime': 'ok'
+    })
+
+
 @app.route('/')
 def index():
     return render_template('index.html')
 
+
 @app.route('/convert', methods=['POST'])
+@rate_limit(limit=30, window=60)
 def convert():
     if 'image' not in request.files:
         return jsonify({'error': 'No image uploaded'}), 400
@@ -144,13 +250,21 @@ def convert():
     if file.filename == '':
         return jsonify({'error': 'No image selected'}), 400
     
+    if not allowed_file(file.filename):
+        return jsonify({'error': 'Invalid file type. Allowed: png, jpg, jpeg, gif, bmp, webp'}), 400
+    
     try:
-        target_width = int(request.form.get('width', 100))
-        vertical_scale = int(request.form.get('vertical_scale', 2))
-        char_set = request.form.get('char_set', '@%#*+=-:. ')
+        file_stream = file.stream
+        valid, error_msg = validate_image(file_stream)
+        if not valid:
+            return jsonify({'error': error_msg}), 400
+        
+        target_width = int(request.form.get('width', app.config['DEFAULT_WIDTH']))
+        vertical_scale = int(request.form.get('vertical_scale', app.config['DEFAULT_VERTICAL_SCALE']))
+        char_set = request.form.get('char_set', app.config['DEFAULT_CHARSET'])
         reverse = request.form.get('reverse', 'false').lower() == 'true'
         theme = request.form.get('theme', 'light')
-        zoom = float(request.form.get('zoom', 1.0))
+        zoom = float(request.form.get('zoom', app.config['DEFAULT_ZOOM']))
         
         if theme not in GRADIENT_THEMES:
             theme = 'light'
@@ -158,16 +272,17 @@ def convert():
         if reverse:
             char_set = char_set[::-1]
         
+        file.seek(0)
         pil_image = Image.open(file.stream)
         orig_w, orig_h = pil_image.size
         
-        pixels, w, h = pil_to_pixels(pil_image)
+        pil_image = ascii_converter.validate_image(pil_image, app.config['MAX_IMAGE_DIMENSION'])
+        pixels, w, h = ascii_converter.pil_to_pixels(pil_image)
         
         aspect_ratio = h / w
-        scaled_w = target_width
         scaled_h = int(target_width * aspect_ratio * vertical_scale)
         
-        resized_pixels, rw, rh = ascii_converter.resize_image(pixels, w, h, target_width)
+        resized_pixels, rw, rh = ascii_converter.resize_image_pillow(pil_image, target_width, vertical_scale)
         
         ascii_art = ascii_converter.pixels_to_ascii(resized_pixels, char_set, 1)
         
@@ -175,17 +290,16 @@ def convert():
         
         png_img = pixels_to_image(resized_pixels, ascii_art, theme, zoom, orig_w, orig_h)
         
-        global last_generated_image
-        last_generated_image = None
-        
         img_base64 = None
         if png_img:
             img_io = io.BytesIO()
-            png_img.save(img_io, 'PNG', quality=95)
+            png_img.save(img_io, 'PNG', quality=85, optimize=True)
             img_io.seek(0)
             img_base64 = base64.b64encode(img_io.getvalue()).decode('utf-8')
-            img_io.seek(0)
-            last_generated_image = img_io.getvalue()
+        
+        del pixels
+        del resized_pixels
+        del pil_image
         
         return jsonify({
             'ascii_art': ascii_text,
@@ -198,36 +312,97 @@ def convert():
         })
         
     except Exception as e:
-        import traceback
-        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
+        logging.error(f"Conversion error: {str(e)}")
+        return jsonify({'error': 'An error occurred processing your image. Please try again.'}), 500
+
 
 @app.route('/download/txt', methods=['POST'])
+@rate_limit(limit=30, window=60)
 def download_txt():
-    data = request.get_json()
-    ascii_art = data.get('ascii_art', '')
-    
-    return send_file(
-        io.BytesIO(ascii_art.encode('utf-8')),
-        mimetype='text/plain',
-        as_attachment=True,
-        download_name='ascii_art.txt'
-    )
+    try:
+        data = request.get_json()
+        ascii_art = data.get('ascii_art', '')
+        
+        if not ascii_art:
+            return jsonify({'error': 'No ASCII art to download'}), 400
+        
+        return send_file(
+            io.BytesIO(ascii_art.encode('utf-8')),
+            mimetype='text/plain',
+            as_attachment=True,
+            download_name='ascii_art.txt'
+        )
+    except Exception as e:
+        logging.error(f"Download TXT error: {str(e)}")
+        return jsonify({'error': 'Download failed'}), 500
+
 
 @app.route('/download/img', methods=['POST'])
+@rate_limit(limit=30, window=60)
 def download_img():
-    global last_generated_image
-    
-    if last_generated_image is None:
-        return jsonify({'error': 'No image to download. Generate ASCII art first.'}), 400
-    
-    img_io = io.BytesIO(last_generated_image)
-    
-    return send_file(
-        img_io,
-        mimetype='image/png',
-        as_attachment=True,
-        download_name='ascii_art.png'
-    )
+    try:
+        data = request.get_json()
+        ascii_art = data.get('ascii_art', '')
+        
+        if not ascii_art:
+            return jsonify({'error': 'No image to download. Generate ASCII art first.'}), 400
+        
+        theme = data.get('theme', 'light')
+        zoom = float(data.get('zoom', 1.0))
+        
+        file = request.files.get('image')
+        pil_image = None
+        orig_w, orig_h = 100, 100
+        
+        if file:
+            pil_image = Image.open(file.stream)
+            orig_w, orig_h = pil_image.size
+            pil_image = ascii_converter.validate_image(pil_image)
+            pixels, _, _ = ascii_converter.pil_to_pixels(pil_image)
+            
+            target_width = 100
+            vertical_scale = 2
+            resized_pixels, _, _ = ascii_converter.resize_image_pillow(pil_image, target_width, vertical_scale)
+            ascii_art_lines = ascii_converter.pixels_to_ascii(resized_pixels, '@%#*+=-:. ', 1)
+            
+            png_img = pixels_to_image(resized_pixels, ascii_art_lines, theme, zoom, orig_w, orig_h)
+            
+            del pixels
+            del resized_pixels
+            del pil_image
+        else:
+            pixels = [[(128, 128, 128) for _ in range(100)] for _ in range(100)]
+            ascii_art_lines = ascii_art.split('\n')[:100]
+            png_img = pixels_to_image(pixels, ascii_art_lines, theme, zoom, orig_w, orig_h)
+        
+        if png_img is None:
+            return jsonify({'error': 'Failed to generate image'}), 500
+        
+        img_io = io.BytesIO()
+        png_img.save(img_io, 'PNG', quality=85, optimize=True)
+        img_io.seek(0)
+        
+        return send_file(
+            img_io,
+            mimetype='image/png',
+            as_attachment=True,
+            download_name='ascii_art.png'
+        )
+    except Exception as e:
+        logging.error(f"Download IMG error: {str(e)}")
+        return jsonify({'error': 'Download failed'}), 500
+
+
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({'error': 'Not found'}), 404
+
+
+@app.errorhandler(500)
+def server_error(e):
+    logging.error(f"Server error: {str(e)}")
+    return jsonify({'error': 'Internal server error'}), 500
+
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=app.config['DEBUG'], host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
