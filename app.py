@@ -225,6 +225,62 @@ def pixels_to_image(pixels: list, ascii_art: list, theme: str = 'light',
     return img
 
 
+def pixels_to_image_full(pixels: list, ascii_art: list, theme: str = 'light') -> Image.Image:
+    """Render ASCII art as a full-size PNG where each character is clearly visible."""
+    if not ascii_art or not pixels:
+        return None
+    
+    theme_data = GRADIENT_THEMES.get(theme, GRADIENT_THEMES['light'])
+    gradient_colors = theme_data['gradient']
+    bg_color = theme_data['background']
+    
+    char_pixel_size = 14
+    
+    ascii_w = max(len(line) for line in ascii_art) if ascii_art else 1
+    ascii_h = len(ascii_art) if ascii_art else 1
+    
+    output_width = ascii_w * char_pixel_size
+    output_height = ascii_h * char_pixel_size
+    
+    if output_width < 10 or output_height < 10:
+        return None
+    
+    img = Image.new('RGB', (output_width, output_height), color=bg_color)
+    draw = ImageDraw.Draw(img)
+    
+    font_size = char_pixel_size - 2
+    
+    try:
+        font_path = os.path.join(os.path.dirname(__file__), 'fonts', 'DejaVuSansMono.ttf')
+        font = ImageFont.truetype(font_path, font_size)
+    except Exception:
+        font = ImageFont.load_default()
+    
+    scale_x = char_pixel_size
+    scale_y = char_pixel_size
+    
+    for y, line in enumerate(ascii_art):
+        if y >= len(pixels):
+            break
+        for x, char in enumerate(line):
+            if x >= len(pixels[y]):
+                break
+            if char == ' ':
+                continue
+            
+            r, g_val, b = pixels[y][x]
+            gray = (r * 30 + g_val * 59 + b * 11) // 100
+            
+            color = get_gradient_color(gray, gradient_colors)
+            
+            pos_x = x * scale_x
+            pos_y = y * scale_y
+            
+            draw.text((pos_x, pos_y), char, fill=color, font=font)
+    
+    return img
+
+
 @app.route('/health')
 def health():
     """Health check endpoint."""
@@ -390,6 +446,46 @@ def download_img():
         )
     except Exception as e:
         logging.error(f"Download IMG error: {str(e)}")
+        return jsonify({'error': 'Download failed'}), 500
+
+
+@app.route('/download/img/full', methods=['POST'])
+@rate_limit(limit=30, window=60)
+def download_img_full():
+    try:
+        data = request.get_json()
+        ascii_art = data.get('ascii_art', '')
+        
+        if not ascii_art:
+            return jsonify({'error': 'No image to download. Generate ASCII art first.'}), 400
+        
+        theme = data.get('theme', 'light')
+        
+        ascii_lines = ascii_art.split('\n')
+        ascii_lines = [line for line in ascii_lines if line.strip()]
+        
+        if not ascii_lines:
+            return jsonify({'error': 'Invalid ASCII art'}), 400
+        
+        pixels = [[(128, 128, 128) for _ in range(len(line))] for line in ascii_lines]
+        
+        png_img = pixels_to_image_full(pixels, ascii_lines, theme)
+        
+        if png_img is None:
+            return jsonify({'error': 'Failed to generate image'}), 500
+        
+        img_io = io.BytesIO()
+        png_img.save(img_io, 'PNG', quality=85, optimize=True)
+        img_io.seek(0)
+        
+        return send_file(
+            img_io,
+            mimetype='image/png',
+            as_attachment=True,
+            download_name='ascii_art.png'
+        )
+    except Exception as e:
+        logging.error(f"Download IMG Full error: {str(e)}")
         return jsonify({'error': 'Download failed'}), 500
 
 

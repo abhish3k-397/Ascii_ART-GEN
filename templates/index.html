@@ -298,13 +298,29 @@
             }
         });
 
-        document.getElementById('downloadImg').addEventListener('click', () => {
-            if (!currentAsciiArt || !asciiPreview.src) return;
-            
-            const a = document.createElement('a');
-            a.href = asciiPreview.src;
-            a.download = 'ascii_art.png';
-            a.click();
+        document.getElementById('downloadImg').addEventListener('click', async () => {
+            if (!currentAsciiArt) return;
+
+            try {
+                const response = await fetch('/download/img/full', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ascii_art: currentAsciiArt, theme: currentTheme })
+                });
+
+                if (!response.ok) throw new Error('Download failed');
+
+                const blob = await response.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'ascii_art.png';
+                a.click();
+                URL.revokeObjectURL(url);
+
+            } catch (error) {
+                showError('Failed to download PNG');
+            }
         });
 
         function showError(message) {
