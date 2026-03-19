@@ -602,6 +602,18 @@ header p {
     background: linear-gradient(135deg, #1A1612 50%, #3B82F6 50%);
 }
 
+[data-theme="dark"] .theme-preview {
+    border-color: #6B5D4A;
+}
+
+[data-theme="dark"] .theme-preview.light {
+    background: linear-gradient(135deg, #E8E0D4 50%, #D4A574 50%);
+}
+
+[data-theme="dark"] .theme-preview.warm {
+    background: linear-gradient(135deg, #FDE68A 50%, #EF4444 50%);
+}
+
 .download-btns {
     display: flex;
     gap: 0.75rem;
@@ -704,6 +716,10 @@ header h1 {
         top: auto;
         transform: none;
         margin-top: 1rem;
+    }
+
+    .theme-toggle:hover {
+        transform: translateX(-2px);
     }
 
     .header-top {

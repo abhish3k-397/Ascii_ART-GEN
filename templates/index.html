@@ -23,7 +23,7 @@
         </header>
 
         <div class="main-grid">
-            <aside class="glass-panel controls-panel">
+            <aside class="controls-panel">
                 <div class="upload-zone" id="uploadZone">
                     <input type="file" id="imageInput" accept="image/*">
                     <span class="upload-icon">🖼️</span>
@@ -93,7 +93,7 @@
                 </div>
             </aside>
 
-            <main class="glass-panel result-panel">
+            <main class="result-panel">
                 <h2>Result</h2>
                 
                 <div class="empty-state" id="emptyState">
@@ -147,11 +147,16 @@
         const themeIcon = document.getElementById('themeIcon');
         const html = document.documentElement;
 
+        const savedUiTheme = localStorage.getItem('ui-theme') || 'light';
+        html.setAttribute('data-theme', savedUiTheme);
+        themeIcon.textContent = savedUiTheme === 'light' ? '☀' : '☾';
+
         themeToggle.addEventListener('click', () => {
             const currentTheme = html.getAttribute('data-theme');
             const newTheme = currentTheme === 'light' ? 'dark' : 'light';
             html.setAttribute('data-theme', newTheme);
             themeIcon.textContent = newTheme === 'light' ? '☀' : '☾';
+            localStorage.setItem('ui-theme', newTheme);
         });
 
         const uploadZone = document.getElementById('uploadZone');
@@ -173,15 +178,24 @@
         const reverseCheckbox = document.getElementById('reverse');
 
         let currentAsciiArt = '';
-        let currentTheme = 'light';
+        let currentTheme = localStorage.getItem('output-theme') || 'light';
         let currentZoom = 1.0;
         let isConverting = false;
+
+        const savedOutputTheme = localStorage.getItem('output-theme');
+        if (savedOutputTheme) {
+            document.querySelectorAll('.theme-btn').forEach(b => {
+                b.classList.remove('active');
+                if (b.dataset.theme === savedOutputTheme) b.classList.add('active');
+            });
+        }
 
         document.querySelectorAll('.theme-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 document.querySelectorAll('.theme-btn').forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
                 currentTheme = btn.dataset.theme;
+                localStorage.setItem('output-theme', currentTheme);
             });
         });
 
