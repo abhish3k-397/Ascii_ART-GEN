@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -9,8 +9,17 @@
 <body>
     <div class="container">
         <header>
-            <h1>ASCII Art Generator</h1>
-            <p>Transform your images into stunning ASCII art</p>
+            <div class="header-top">
+                <div>
+                    <h1>ASCII Art Generator</h1>
+                    <p>Transform your images into stunning ASCII art</p>
+                </div>
+                <button class="theme-toggle" id="themeToggle" title="Toggle theme">
+                    <div class="toggle-thumb">
+                        <span id="themeIcon">☀</span>
+                    </div>
+                </button>
+            </div>
         </header>
 
         <div class="main-grid">
@@ -134,6 +143,17 @@
     </div>
 
     <script>
+        const themeToggle = document.getElementById('themeToggle');
+        const themeIcon = document.getElementById('themeIcon');
+        const html = document.documentElement;
+
+        themeToggle.addEventListener('click', () => {
+            const currentTheme = html.getAttribute('data-theme');
+            const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+            html.setAttribute('data-theme', newTheme);
+            themeIcon.textContent = newTheme === 'light' ? '☀' : '☾';
+        });
+
         const uploadZone = document.getElementById('uploadZone');
         const imageInput = document.getElementById('imageInput');
         const previewImage = document.getElementById('previewImage');
